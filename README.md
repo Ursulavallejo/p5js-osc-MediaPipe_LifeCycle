@@ -5,7 +5,14 @@
 This experiment connects **Processing (audio + OSC)** with **p5.js (visuals)** and **MediaPipe Hands (camera tracking)** to create an **interactive flower** that reacts to hand gestures and phases of motion.
 
 ---
+### Video:
 
+
+https://github.com/user-attachments/assets/8c81f2c9-bde8-4bb1-a8a5-b9e690b409d9
+
+
+
+---
 ### ⚙️ How It Works
 
 - The camera feed is processed with **MediaPipe Hands** (from Google).
