@@ -8,8 +8,7 @@ This experiment connects **Processing (audio + OSC)** with **p5.js (visuals)** a
 ### Video:
 
 
-https://github.com/user-attachments/assets/8c81f2c9-bde8-4bb1-a8a5-b9e690b409d9
-
+https://github.com/user-attachments/assets/0f2ecb49-68b8-4602-b6b8-bc5a00fa043f
 
 
 ---
