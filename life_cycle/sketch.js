@@ -1,63 +1,42 @@
-// === Interactive Flower — p5.js + MediaPipe Hands + OSC Bridge ===
-//  thresholds tuned for pinch open/close and finger spread.
-// - Pinch controls SEED ↔ GROW ↔ BLOOM (open/close).
-// - 5 fingers open triggers DISPERSE (particles).
-// - Canvas is fixed-fullscreen; windowResized keeps it exact to viewport.
+// === Interactive Flower — p5.js + MediaPipe Hands + OSC Bridge (original working version) ===
+// Simple pinch/finger-driven lifecycle: SEED → GROW → BLOOM → DISPERSE
 
-// ---- Hand & interaction state ----
 let video, hands, camera
-let pinch = 0 // 0..1 (thumb-index distance normalized, mapped)
-let fingers = 0 // 0..5 (rough heuristic)
-let pinchSmooth = 0 // smoothed pinch
+let pinch = 0 // 0..1 (thumb-index distance normalized)
+let fingers = 0 // 0..5 extended
+let pinchSmooth = 0
 const alpha = 0.25 // EMA smoothing
 
-// ---- Visual state machine ----
+// Visual state machine
 const PHASE = { SEED: 0, GROW: 1, BLOOM: 2, DISPERSE: 3 }
 let phase = PHASE.SEED
-let tPhase = 0 // seconds elapsed inside current phase
+let tPhase = 0 // time inside phase (seconds)
 let particles = []
 
-// ---- OSC Bridge (Node) ----
-let socket = null
-
-// ---- Thresholds (tweak-friendly) ----
-const PINCH_GROW_T = 0.15 // pinchSmooth > this → start GROW
-const PINCH_RELEASE_T = 0.12 // pinchSmooth < this (after growing) → BLOOM
-const FINGERS_FOR_BLOOM = 2 // alternative bloom trigger
-const FINGERS_FOR_DISPERSE = 5
-
-// Keep a flag so BLOOM only happens after having grown at least once
-let hasGrown = false
+let socket = null // OSC via bridge
 
 function setup() {
-  // Create a fixed, full-viewport canvas
-  const cnv = createCanvas(window.innerWidth, window.innerHeight)
-  // Avoid HiDPI surprises when mapping 1:1 to viewport
+  createCanvas(windowWidth, windowHeight)
   pixelDensity(1)
   noStroke()
 
-  // Attach CSS styles via p5 to ensure position and fit (redundant with global.css but safe)
-  cnv.style('position', 'fixed')
-  cnv.style('top', '0')
-  cnv.style('left', '0')
-  cnv.style('width', '100vw')
-  cnv.style('height', '100vh')
+  // Optional socket to bridge
+  // socket = io('http://localhost:8081')
+  socket = io('http://127.0.0.1:8081') // o localhost
 
-  // Optional: connect to OSC bridge
-  // socket = io('http://localhost:8081');
-  socket = io('http://127.0.0.1:8081')
-  // Tell the bridge the OSC ports (Processing <-> Node)
+  //IMPORTANT: send the port configuration to the bridge:
   socket.emit('config', {
-    server: { host: '127.0.0.1', port: 12000 }, // Processing SENDS to 12000
-    client: { host: '127.0.0.1', port: 8000 }, // Processing LISTENS on 8000
+    server: { host: '127.0.0.1', port: 12000 }, // <- Where does Processing SEND (your Processing sends to 12000)
+    client: { host: '127.0.0.1', port: 8000 }, // <- where Processing LISTENS (oscP5 on 8000)
   })
 
-  // Listen to OSC → Web (if you need values back from Processing)
+  // If you want to listen to what comes from Processing:
   socket.on('message', (msg) => {
-    // msg example: ['/test', mouseX, mouseY, r, g, b]
+    //msg is an array type ['/test', mouseX, mouseY, r, g, b]
+    // console.log('OSC → Web:', msg)
     const [addr, ...args] = msg
     if (addr === '/test') {
-      // You could map args to visual globals here
+      // Example: you could use those values to alter your visual
     }
   })
 
@@ -65,15 +44,11 @@ function setup() {
 }
 
 function setupHands() {
-  // p5 capture
   video = createCapture(VIDEO, () => {
     video.size(640, 480)
   })
-  // Important for iOS Safari inline playback
-  video.elt.setAttribute('playsinline', '')
   video.hide()
 
-  // MediaPipe Hands
   hands = new Hands({
     locateFile: (file) =>
       `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
@@ -88,7 +63,6 @@ function setupHands() {
 
   hands.onResults(onHandsResults)
 
-  // Use MediaPipe Camera helper to drive frames
   camera = new Camera(video.elt, {
     onFrame: async () => {
       await hands.send({ image: video.elt })
@@ -100,20 +74,21 @@ function setupHands() {
 }
 
 function onHandsResults(results) {
-  // Compute pinch & fingers for the first detected hand
+  // Compute pinch & fingers
   if (results.multiHandLandmarks && results.multiHandLandmarks.length) {
     const lm = results.multiHandLandmarks[0]
+    const thumb = lm[4],
+      index = lm[8]
 
-    // Thumb (4), Index (8)
-    const dx = lm[4].x - lm[8].x
-    const dy = lm[4].y - lm[8].y
+    // Distance normalized by diag of video
+    const dx = thumb.x - index.x
+    const dy = thumb.y - index.y
     const d = Math.sqrt(dx * dx + dy * dy)
 
-    // Map typical pinch distance [~0.02..0.18] → [0..1]
+    // typical pinch range ~[0.0 .. 0.2], remap to 0..1 (clamped)
     pinch = constrain(map(d, 0.02, 0.18, 0, 1), 0, 1)
 
-    // Count extended fingers via simple y-tip vs y-pip heuristic
-    fingers = countExtendedFingers(lm)
+    fingers = countExtendedFingers(lm) // simple heuristic below
   } else {
     pinch = 0
     fingers = 0
@@ -121,92 +96,71 @@ function onHandsResults(results) {
 }
 
 function countExtendedFingers(lm) {
-  // Very simple heuristic: tip.y < pip.y when finger is extended (assuming upright hand)
+  // Very simple heuristic: compare tip vs pip y for each finger (assuming upright)
   // Tips: 4,8,12,16,20 — PIPs: 3,6,10,14,18
-  const TIP = [4, 8, 12, 16, 20]
-  const PIP = [3, 6, 10, 14, 18]
-
+  const TIP = [4, 8, 12, 16, 20],
+    PIP = [3, 6, 10, 14, 18]
   let count = 0
-
-  // Skip index 0 because it's the thumb here; handle thumb separately
+  // Ignore thumb in this basic heuristic (count it if far from palm)
   for (let i = 1; i < 5; i++) {
     if (lm[TIP[i]].y < lm[PIP[i]].y) count++
   }
-
-  // Rudimentary thumb check: horizontal spread vs base
+  // rudimentary thumb check: x distance vs wrist (landmark 0)
   const thumbOpen = Math.abs(lm[4].x - lm[2].x) > 0.05
   if (thumbOpen) count++
-
   return constrain(count, 0, 5)
 }
 
 function draw() {
   background(10)
 
-  // Smooth pinch and advance time inside current phase
+  // Update smoothing & phase timer
   pinchSmooth += (pinch - pinchSmooth) * alpha
   tPhase += deltaTime / 1000
 
-  // Background: rotating molecular nest
+  // Back layer: rotating molecular nest
   drawMolecularNest(frameCount * 0.002)
 
-  // State machine
+  // State transitions
   switch (phase) {
     case PHASE.SEED:
       drawSeed(pinchSmooth)
-      // Start growing when pinch begins
-      if (pinchSmooth > PINCH_GROW_T) {
-        hasGrown = true
-        gotoPhase(PHASE.GROW)
-      }
+      if (pinchSmooth > 0.15) gotoPhase(PHASE.GROW)
       break
 
     case PHASE.GROW:
       drawGrowingFlower(pinchSmooth, tPhase)
-      // Bloom if user releases pinch OR at least 2 fingers detected
-      if (
-        (hasGrown && pinchSmooth < PINCH_RELEASE_T) ||
-        fingers >= FINGERS_FOR_BLOOM
-      ) {
-        gotoPhase(PHASE.BLOOM)
-      }
+      if (fingers >= 3) gotoPhase(PHASE.BLOOM)
       break
 
     case PHASE.BLOOM:
       drawBloom(pinchSmooth, tPhase)
-      // Disperse on fully open hand (5 fingers)
-      if (fingers >= FINGERS_FOR_DISPERSE) {
-        gotoPhase(PHASE.DISPERSE)
-      }
+      if (fingers >= 5) gotoPhase(PHASE.DISPERSE)
       break
 
     case PHASE.DISPERSE:
       drawDisperse(tPhase)
-      // After particles fade, reset cycle
-      if (tPhase > 2.0) {
-        hasGrown = false
-        gotoPhase(PHASE.SEED)
-      }
+      if (tPhase > 2.0) gotoPhase(PHASE.SEED)
       break
   }
 
-  // Optional debug overlay
-  // drawHUD();
+  // Optional debug
+  drawHUD()
 }
 
 function gotoPhase(p) {
   phase = p
   tPhase = 0
 
-  // Emit OSC for external sync (Processing, lights, etc.)
+  // Optional: emit to OSC via bridge
   if (socket) {
     socket.emit('osc-send', ['/hand/pinch', pinchSmooth])
     socket.emit('osc-send', ['/hand/fingers', fingers])
-    socket.emit('osc-send', ['/viz/phase', phase]) // 0..3
+    socket.emit('osc-send', ['/viz/phase', phase])
   }
 
-  // Initialize particles when entering DISPERSE
   if (phase === PHASE.DISPERSE) {
+    // init particles from current bloom
     particles = makeParticles(180)
   }
 }
@@ -214,26 +168,24 @@ function gotoPhase(p) {
 function drawMolecularNest(theta) {
   push()
   translate(width / 2, height / 2)
-
+  // Concentric orbits of nodes
   const rings = 4
   for (let r = 0; r < rings; r++) {
     const rad = 60 + r * 55
     const n = 10 + r * 6
-
     for (let i = 0; i < n; i++) {
       const a = theta * 0.4 + (i * TWO_PI) / n + r * 0.3
-      const x = rad * Math.cos(a)
-      const y = rad * Math.sin(a)
+      const x = rad * cos(a)
+      const y = rad * sin(a)
       const s = 4 + r * 1.2
-
       fill(180 - r * 25, 180 - r * 25, 220, 150)
       circle(x, y, s)
 
-      // Light links
+      // links (light lines)
       if (i % 3 === 0) {
-        const a2 = a + 0.25 + 0.1 * Math.sin(theta * 1.5 + r)
-        const x2 = (rad + 25) * Math.cos(a2)
-        const y2 = (rad + 25) * Math.sin(a2)
+        const a2 = a + 0.25 + 0.1 * sin(theta * 1.5 + r)
+        const x2 = (rad + 25) * cos(a2)
+        const y2 = (rad + 25) * sin(a2)
         stroke(120, 130, 200, 70)
         line(x, y, x2, y2)
         noStroke()
@@ -256,25 +208,22 @@ function drawGrowingFlower(p, tp) {
   // p: 0..1 — growth factor from pinch
   push()
   translate(width / 2, height / 2)
-
   const petals = 8
   const radius = lerp(30, 140, easeOutCubic(p))
-
   for (let i = 0; i < petals; i++) {
-    const a = (i * TWO_PI) / petals + 0.3 * Math.sin(tp * 1.5)
-    const px = radius * Math.cos(a)
-    const py = radius * Math.sin(a)
-    fill(255, 140 + 50 * Math.sin(tp + i), 180)
+    const a = (i * TWO_PI) / petals + 0.3 * sin(tp * 1.5)
+    const px = radius * cos(a)
+    const py = radius * sin(a)
+    fill(255, 140 + 50 * sin(tp + i), 180)
     ellipse(px, py, 40, 90)
   }
-
-  // Core
+  // core
   fill(255, 220, 120)
   circle(0, 0, lerp(30, 55, p))
   pop()
 }
 
-function drawBloom(_p, tp) {
+function drawBloom(p, tp) {
   // Full bloom with subtle pulsation
   drawGrowingFlower(1.0, tp)
 }
@@ -295,7 +244,7 @@ function makeParticles(n) {
 
 function drawDisperse(tp) {
   // explode and fade out
-  for (const pa of particles) {
+  for (let pa of particles) {
     pa.x += pa.vx
     pa.y += pa.vy
     const k = 1 - tp / pa.life
@@ -307,7 +256,7 @@ function drawDisperse(tp) {
 }
 
 function easeOutCubic(x) {
-  return 1 - Math.pow(1 - x, 3)
+  return 1 - pow(1 - x, 3)
 }
 
 // Optional HUD for debugging
@@ -320,9 +269,4 @@ function drawHUD() {
     12,
     20
   )
-}
-
-// Keep canvas exactly at viewport size on resize/orientation changes
-function windowResized() {
-  resizeCanvas(window.innerWidth, window.innerHeight)
 }
